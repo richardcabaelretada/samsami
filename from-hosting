@@ -1,0 +1,117 @@
+const express = require('express');
+const path = require('path');
+const sqlite3 = require('better-sqlite3');
+const natural = require('natural');
+const { WordTokenizer, JaroWinklerDistance } = natural;
+
+const app = express();
+const tokenizer = new WordTokenizer();
+
+const dbPath = path.join(__dirname, 'sim', 'data', 'data.sqlite');
+const db = sqlite3(dbPath);
+
+const initializeDatabase = () => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS data (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ask TEXT,
+      ans TEXT
+    )
+  `);
+};
+
+initializeDatabase();
+
+let databaseCache = [];
+
+const fetchDataFromDB = () => {
+  const rows = db.prepare('SELECT ask, ans FROM data').all();
+  databaseCache = rows;
+};
+
+fetchDataFromDB();
+
+const filterStrings = (input, databaseStrings) => {
+  return databaseStrings.filter(str => str.ask.startsWith(input.substring(0, 3))); // Adjust the condition as per your requirement
+};
+
+const computeSimilarity = (input, databaseStrings) => {
+  const inputTokens = tokenizer.tokenize(input.toLowerCase());
+  return databaseStrings.map(str => {
+    const strTokens = tokenizer.tokenize(str.ask.toLowerCase());
+    const similarity = JaroWinklerDistance(inputTokens, strTokens);
+    return { string: str.ask, similarity };
+  });
+};
+
+app.get('/api/sim/simv3', async (req, res) => {
+  if (!req.query.type) return res.json({ error: 'Lack of data to launch' });
+
+  if (req.query.type === 'ask') {
+    const ask = encodeURI(req.query.ask);
+    if (!ask) return res.json({ error: 'Missing data to launch the program' });
+
+    const relevantStrings = filterStrings(ask, databaseCache);
+
+    const similarityResults = computeSimilarity(decodeURI(ask), relevantStrings);
+
+    const bestMatch = similarityResults.reduce((prev, curr) => {
+      return curr.similarity > prev.similarity ? curr : prev;
+    }, { string: '', similarity: 0 });
+
+    if (bestMatch.similarity >= 0.1) {
+      const search = bestMatch.string;
+      const filteredRows = databaseCache.filter(row => row.ask === search);
+      if (filteredRows.length === 0) return res.json({ answer: '\n' });
+
+      const randomRow = filteredRows[Math.floor(Math.random() * filteredRows.length)];
+      const a = JSON.parse(randomRow.ans);
+      const answer = a[Math.floor(Math.random() * a.length)];
+      return res.json({ answer });
+    } else {
+      return res.json({ answer: '\n' });
+    }
+  }
+
+  if (req.query.type === 'teach') {
+    const ask = req.query.ask;
+    const ans = req.query.ans;
+    if (!ask || !ans) return res.json({ error: 'Missing data to execute the command' });
+
+    const existingRow = databaseCache.find(row => row.ask === ask);
+    if (existingRow) {
+      const existingAns = JSON.parse(existingRow.ans);
+      if (existingAns.includes(ans)) {
+        return res.json({ error: 'The answer already exists!' });
+      }
+
+      existingAns.push(ans);
+
+      db.prepare('UPDATE data SET ans = ? WHERE ask = ?').run(JSON.stringify(existingAns), ask);
+
+      return res.json({
+        msg: 'Teach sim success',
+        data: { ask, ans }
+      });
+    } else {
+      db.prepare('INSERT INTO data (ask, ans) VALUES (?, ?)').run(ask, JSON.stringify([ans]));
+
+      // Update the cache
+      databaseCache.push({ ask, ans: JSON.stringify([ans]) });
+
+      return res.json({
+        msg: 'Teach sim success',
+        data: { ask, ans }
+      });
+    }
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('<h1>Hello, World!</h1>');
+});
+
+const PORT = process.env.PORT || 6007;
+app.listen(PORT, '0.0.0.0', () => { // Listen on all network interfaces
+  console.log(`Server is listening on port ${PORT}`);
+});

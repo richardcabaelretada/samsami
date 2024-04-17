@@ -1,0 +1,139 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
+const sqlite3 = require('sqlite3').verbose();
+const natural = require('natural');
+
+const app = express();
+const tokenizer = new natural.WordTokenizer();
+
+const dbPath = path.join(__dirname, 'sim', 'data', 'data.sqlite');
+const pool = new sqlite3.Database(dbPath);
+
+const initializeDatabase = () => {
+  pool.run(`
+    CREATE TABLE IF NOT EXISTS data (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ask TEXT,
+      ans TEXT
+    )
+  `);
+};
+
+initializeDatabase();
+
+let databaseCache = [];
+
+const fetchDataFromDB = async () => {
+  return new Promise((resolve, reject) => {
+    pool.all('SELECT ask, ans FROM data', (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows);
+      }
+    });
+  });
+};
+
+fetchDataFromDB().then(rows => {
+  databaseCache = rows;
+}).catch(err => {
+  console.error('Failed to fetch data from the database:', err);
+});
+
+const filterStrings = (input, databaseStrings) => {
+  return databaseStrings.filter(str => {
+    return str.ask.startsWith(input.substring(0, 3)); // Adjust the condition as per your requirement
+  });
+};
+
+const computeSimilarity = (input, databaseStrings) => {
+  const inputTokens = tokenizer.tokenize(input.toLowerCase());
+  return databaseStrings.map(str => {
+    const strTokens = tokenizer.tokenize(str.ask.toLowerCase());
+    const similarity = natural.JaroWinklerDistance(inputTokens, strTokens);
+    return { string: str.ask, similarity };
+  });
+};
+
+app.get('/sim/simv3', async (req, res, next) => {
+  if (!req.query.type) return res.json({ error: 'lack of data to launch ' });
+
+  if (req.query.type === 'ask') {
+    const ask = encodeURI(req.query.ask);
+    if (!ask) return res.json({ error: 'missing data to launch the program' });
+
+    const relevantStrings = filterStrings(ask, databaseCache);
+
+    const similarityResults = computeSimilarity(decodeURI(ask), relevantStrings);
+
+    const bestMatch = similarityResults.reduce((prev, curr) => {
+      return curr.similarity > prev.similarity ? curr : prev;
+    }, { string: '', similarity: 0 });
+
+    if (bestMatch.similarity >= 0.1) {
+      const search = bestMatch.string;
+      const filteredRows = databaseCache.filter(row => row.ask === search);
+      if (filteredRows.length === 0) return res.jsonp({ answer: 'I dont understand anything!!!' });
+
+      const randomRow = filteredRows[Math.floor(Math.random() * filteredRows.length)];
+      const a = JSON.parse(randomRow.ans);
+      const answer = a[Math.floor(Math.random() * a.length)];
+      return res.jsonp({ answer });
+    } else {
+      return res.jsonp({ answer: 'I dont understand anything!!!' });
+    }
+  }
+
+  if (req.query.type === 'teach') {
+    const ask = req.query.ask;
+    const ans = req.query.ans;
+    if (!ask || !ans) return res.json({ error: 'missing data to execute the command' });
+
+    const existingRow = databaseCache.find(row => row.ask === ask);
+    if (existingRow) {
+      const existingAns = JSON.parse(existingRow.ans);
+      if (existingAns.includes(ans)) {
+        return res.json({ error: 'The answer already exists!' });
+      }
+
+      existingAns.push(ans);
+
+      pool.run('UPDATE data SET ans = ? WHERE ask = ?', [JSON.stringify(existingAns), ask], (err) => {
+        if (err) {
+          return res.json({ error: 'Failed to update data in the database' });
+        }
+
+        return res.json({
+          msg: 'Teach sim success',
+          data: { ask, ans }
+        });
+      });
+    } else {
+      pool.run('INSERT INTO data (ask, ans) VALUES (?, ?)', [ask, JSON.stringify([ans])], (err) => {
+        if (err) {
+          return res.json({ error: 'Failed to insert data into the database' });
+        }
+
+        // Update the cache
+        databaseCache.push({ ask, ans: JSON.stringify([ans]) });
+
+        return res.json({
+          msg: 'Teach sim success',
+          data: { ask, ans }
+        });
+      });
+    }
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('<h1>Hello, World!</h1>');
+});
+
+const PORT = process.env.PORT || 2014;
+app.listen(PORT, '0.0.0.0', () => { // Listen on all network interfaces
+  console.log(`Server is listening on port ${PORT}`);
+});

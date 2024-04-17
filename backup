@@ -1,0 +1,135 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
+const sqlite3 = require('sqlite3').verbose();
+const stringSimilarity = require('string-similarity');
+
+const app = express();
+
+const downloadFile = async (url, filePath) => {
+  const writer = fs.createWriteStream(filePath);
+  const response = await axios({
+    url,
+    method: 'GET',
+    responseType: 'stream'
+  });
+
+  response.data.pipe(writer);
+
+  return new Promise((resolve, reject) => {
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+  });
+};
+
+const initializeDatabase = () => {
+  const dbPath = path.join(__dirname, 'sim', 'data', 'data.sqlite');
+  const db = new sqlite3.Database(dbPath);
+
+  // Create the data table if it doesn't exist
+  db.run(`
+    CREATE TABLE IF NOT EXISTS data (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ask TEXT,
+      ans TEXT
+    )
+  `);
+
+  db.close();
+};
+
+initializeDatabase();
+
+app.get('/sim/simv3', async(req, res, next) => {
+  let dataSim;
+
+  const dbPath = path.join(__dirname, 'sim', 'data', 'data.sqlite');
+
+  dataSim = new sqlite3.Database(dbPath);
+
+  if (!req.query.type) return res.json({ error: 'lack of data to launch ' });
+
+  if (req.query.type == 'ask') {
+    var ask = encodeURI(req.query.ask);
+    if (!ask) return res.json({ error: 'missing data to launch the program' });
+
+    dataSim.all('SELECT ask FROM data', (err, rows) => {
+      if (err) {
+        return res.json({ error: 'Failed to fetch data from the database' });
+      }
+
+      const msg = rows.map(row => row.ask);
+      var checker = stringSimilarity.findBestMatch(decodeURI(ask), msg);
+      if (checker.bestMatch.rating >= 0.1) {
+        var search = checker.bestMatch.target;
+      }
+      if (search == undefined) return res.jsonp({ answer: 'I dont understand anything!!!' });
+
+      dataSim.all('SELECT * FROM data WHERE ask = ?', [search], (err, rows) => {
+        if (err) {
+          return res.json({ error: 'Failed to fetch data from the database' });
+        }
+
+        const find = rows[Math.floor(Math.random() * rows.length)];
+        if (!find) return res.jsonp({ answer: 'I dont understand anything!!!' });
+
+        const a = JSON.parse(find.ans);
+        const answer = a[Math.floor(Math.random() * a.length)];
+        return res.jsonp({ answer });
+      });
+    });
+  }
+
+  if (req.query.type == 'teach') {
+    const ask = req.query.ask;
+    const ans = req.query.ans;
+    if (!ask || !ans) return res.json({ error: 'missing data to execute the command' });
+
+    dataSim.all('SELECT * FROM data WHERE ask = ?', [ask], (err, rows) => {
+      if (err) {
+        return res.json({ error: 'Failed to fetch data from the database' });
+      }
+
+      if (rows.length > 0) {
+        const existingAns = JSON.parse(rows[0].ans);
+        if (existingAns.includes(ans)) {
+          return res.json({ error: 'The answer already exists!' });
+        }
+
+        existingAns.push(ans);
+
+        dataSim.run('UPDATE data SET ans = ? WHERE ask = ?', [JSON.stringify(existingAns), ask], (err) => {
+          if (err) {
+            return res.json({ error: 'Failed to update data in the database' });
+          }
+
+          return res.json({
+            msg: 'Teach sim success',
+            data: { ask, ans }
+          });
+        });
+      } else {
+        dataSim.run('INSERT INTO data (ask, ans) VALUES (?, ?)', [ask, JSON.stringify([ans])], (err) => {
+          if (err) {
+            return res.json({ error: 'Failed to insert data into the database' });
+          }
+
+          return res.json({
+            msg: 'Teach sim success',
+            data: { ask, ans }
+          });
+        });
+      }
+    });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('<h1>Hello, World!</h1>');
+});
+
+const PORT = process.env.PORT || 2014;
+app.listen(PORT, '0.0.0.0', () => { // Listen on all network interfaces
+  console.log(`Server is listening on port ${PORT}`);
+});
